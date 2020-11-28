@@ -1,51 +1,41 @@
 #![allow(dead_code)]
+#![deny(missing_docs)]
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::fmt::Formatter;
 use std::fmt::Result as FmtResult;
+use std::hash::Hash;
+use std::ptr::NonNull;
+use std::rc::Rc;
+
 #[test]
 fn test_list() {
     unsafe {
-        let mut list = Link::<i32>::new(123);
-        list.push_front(1);
-        list.push_front(2);
-        list.push_back(3);
-        list.push_back(4);
-        // [2,1,3,4]
-        assert_eq!(list.len, 4);
-        assert_eq!(2, (*list.head).value);
-        assert_eq!(1, (*(*list.head).next).value);
-        assert_eq!(3, (*(*list.tail).prev).value);
-        assert_eq!(4, (*list.tail).value);
-        assert_eq!(3, (*(*(*list.head).next).next).value);
-
-        list.remove_node((*(*list.head).next).next);
-        // [2,1,4]
-        assert_eq!(list.len, 3);
-        assert_eq!(4, (*(*(*list.head).next).next).value);
-        assert_eq!(2, (*list.head).value);
-        assert_eq!(1, (*(*list.head).next).value);
-        assert_eq!(4, (*list.tail).value);
-        list.remove_node(list.head);
-        // [1,4]
-        assert_eq!(list.len, 2);
-        assert_eq!(1, (*list.head).value);
-        assert_eq!(1, (*(*list.tail).prev).value);
-        assert_eq!(4, (*list.tail).value);
-        assert_eq!(4, (*(*list.head).next).value);
-        list.remove_node(list.tail);
-        // [1]
+        let mut list = Link::new(123);
+        for i in (0..10).rev() {
+            list.push_front(i);
+        }
+        for i in 10..20 {
+            list.push_back(i);
+        }
+        assert_eq!(list.len, 20);
+        for i in 0..20 {
+            assert_eq!(i, list.get_node_at(i).unwrap().as_ref().value);
+            assert_eq!(i, list.get_node_rev(19 - i).unwrap().as_ref().value);
+        }
+        for i in 0..19 {
+            if i % 2 == 0 {
+                list.remove_node(list.head);
+            } else {
+                list.remove_node(list.tail);
+            }
+        }
         assert_eq!(list.len, 1);
-        assert_eq!(1, (*list.head).value);
-        assert_eq!(1, (*list.tail).value);
-        assert_eq!(list.head, list.tail);
-        assert!((*list.head).prev.is_null());
-        assert!((*list.head).next.is_null());
+        assert_eq!(list.tail, list.head);
         list.remove_node(list.tail);
-        // []
+
         assert_eq!(list.len, 0);
-        assert!(list.head.is_null());
-        assert!(list.tail.is_null());
+        assert!(list.head.is_none() && list.tail.is_none());
     }
 }
 
@@ -53,189 +43,231 @@ fn test_list() {
 fn to_raw<T>(t: T) -> *mut T {
     Box::leak(Box::new(t))
 }
-// TODO Option<NonNull<Node<T>>>
+
 #[derive(Debug)]
 struct Node<T> {
-    prev: *mut Node<T>,
-    next: *mut Node<T>,
-    list: *mut Link<T>,
+    prev: Option<NonNull<Node<T>>>,
+    next: Option<NonNull<Node<T>>>,
+    list: Option<NonNull<Link<T>>>,
     value: T,
 }
+
 struct Link<T> {
     times: u64,
     len: usize,
-    head: *mut Node<T>,
-    tail: *mut Node<T>,
-    prev: *mut Link<T>,
-    next: *mut Link<T>,
+    head: Option<NonNull<Node<T>>>,
+    tail: Option<NonNull<Node<T>>>,
+    prev: Option<NonNull<Link<T>>>,
+    next: Option<NonNull<Link<T>>>,
 }
+
 impl<T> Debug for Link<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         unsafe {
             writeln!(f, "Link {:?}", self as *const _)?;
-            let mut c = self.head;
-            while !c.is_null() {
-                write!(f, "{:?} -> ", c)?;
-                c = (*c).next;
+            let mut cur = self.head;
+            while let Some(c) = cur {
+                write!(f, "{:?} -> ", c.as_ptr())?;
+                if c.as_ref().next.is_none() {
+                    break;
+                }
+                cur = c.as_ref().next;
             }
             writeln!(f, "NULL")
         }
     }
 }
+
 impl<T> Link<T> {
     fn new(times: u64) -> Link<T> {
         Link {
             times,
             len: 0,
-            head: std::ptr::null_mut(),
-            tail: std::ptr::null_mut(),
-            prev: std::ptr::null_mut(),
-            next: std::ptr::null_mut(),
+            head: None,
+            tail: None,
+            prev: None,
+            next: None,
         }
     }
+
+    fn get_node_at<'a>(&'a self, i: usize) -> Option<NonNull<Node<T>>> {
+        let mut n = self.head;
+        for _ in 0..i {
+            unsafe {
+                n = n.unwrap().as_ref().next;
+            }
+        }
+        n
+    }
+
+    fn get_node_rev<'a>(&'a self, i: usize) -> Option<NonNull<Node<T>>> {
+        let mut n = self.tail;
+        for _ in 0..i {
+            unsafe {
+                n = n.unwrap().as_ref().prev;
+            }
+        }
+        n
+    }
+
     fn push_back(&mut self, v: T) {
         self.len += 1;
-        let node = Box::leak(Box::new(Node {
+        let node = NonNull::new(to_raw(Node {
             value: v,
-            next: std::ptr::null_mut(),
+            next: None,
             prev: self.tail,
-            list: self,
+            list: NonNull::new(self),
         }));
-        if self.tail.is_null() {
+        if self.tail.is_none() {
             self.head = node;
             self.tail = node;
         } else {
             unsafe {
-                (*self.tail).next = node;
+                self.tail.unwrap().as_mut().next = node;
             }
             self.tail = node;
         }
     }
-    unsafe fn remove_node(&mut self, node: *mut Node<T>) {
-        let cur_list = (*node).list;
-        assert_eq!(self as *mut _, cur_list);
+    unsafe fn remove_node(&mut self, node: Option<NonNull<Node<T>>>) {
+        let cur_list = node.unwrap().as_ref().list;
+        assert_eq!(self as *mut _, cur_list.unwrap().as_ptr());
         if self.head == node {
             self.pop_front();
         } else if self.tail == node {
             self.pop_back();
         } else {
-            (*(*node).next).prev = (*node).prev;
-            (*(*node).prev).next = (*node).next;
-            (*cur_list).len -= 1;
+            node.unwrap().as_ref().next.unwrap().as_mut().prev = node.unwrap().as_ref().prev;
+            node.unwrap().as_ref().prev.unwrap().as_mut().next = node.unwrap().as_ref().next;
+            cur_list.unwrap().as_mut().len -= 1;
+            // (*cur_list).len -= 1;
         }
-        (*node).list = std::ptr::null_mut();
+        node.unwrap().as_mut().list = None;
     }
 
     fn push_front(&mut self, v: T) {
-        let node = Box::leak(Box::new(Node {
+        let node = NonNull::new(to_raw(Node {
             value: v,
             next: self.head,
-            prev: std::ptr::null_mut(),
-            list: self,
+            prev: None,
+            list: NonNull::new(self),
         }));
         self.push_front_node(node);
     }
 
-    fn push_front_node(&mut self, node: *mut Node<T>) {
+    fn push_front_node(&mut self, node: Option<NonNull<Node<T>>>) {
         self.len += 1;
         unsafe {
-            (*node).list = self;
+            node.unwrap().as_mut().list = NonNull::new(self);
         }
-        if self.head.is_null() {
+        if self.head.is_none() {
             unsafe {
-                (*node).next = std::ptr::null_mut();
-                (*node).prev = std::ptr::null_mut();
+                node.unwrap().as_mut().next = None;
+                node.unwrap().as_mut().prev = None;
             }
             self.head = node;
             self.tail = node;
             return;
         }
         unsafe {
-            (*node).next = self.head;
-            (*self.head).prev = node;
+            node.unwrap().as_mut().next = self.head;
+            self.head.unwrap().as_mut().prev = node;
             self.head = node;
-            (*self.head).prev = std::ptr::null_mut();
+            self.head.unwrap().as_mut().prev = None;
         }
     }
-    fn pop_front(&mut self) -> *mut Node<T> {
-        if self.head.is_null() {
-            return std::ptr::null_mut();
+    fn pop_front(&mut self) -> Option<NonNull<Node<T>>> {
+        if self.head.is_none() {
+            return None;
         }
         self.len -= 1;
-        let head = self.head;
+        let ele = self.head;
         unsafe {
-            self.head = (*head).next;
-            if !self.head.is_null() {
-                (*self.head).prev = std::ptr::null_mut();
+            self.head = ele.unwrap().as_ref().next;
+            if let Some(mut h) = self.head {
+                h.as_mut().prev = None;
             }
         }
         unsafe {
-            (*head).list = std::ptr::null_mut();
-            (*head).prev = std::ptr::null_mut();
-            (*head).next = std::ptr::null_mut();
-            if head == self.tail {
-                self.tail = std::ptr::null_mut();
+            ele.unwrap().as_mut().list = None;
+            ele.unwrap().as_mut().prev = None;
+            ele.unwrap().as_mut().next = None;
+            if ele == self.tail {
+                self.tail = None;
             }
         }
-        head
+        ele
     }
 
-    fn pop_back(&mut self) -> *mut Node<T> {
-        if self.tail.is_null() {
-            return std::ptr::null_mut();
+    fn pop_back(&mut self) -> Option<NonNull<Node<T>>> {
+        if self.tail.is_none() {
+            return None;
         }
         self.len -= 1;
         let tail = self.tail;
         unsafe {
-            self.tail = (*tail).prev;
-            if !self.tail.is_null() {
-                (*self.tail).next = std::ptr::null_mut();
+            self.tail = tail.unwrap().as_ref().prev;
+            if let Some(mut t) = self.tail {
+                t.as_mut().next = None;
             }
         }
         unsafe {
-            (*tail).list = std::ptr::null_mut();
-            (*tail).prev = std::ptr::null_mut();
-            (*tail).next = std::ptr::null_mut();
+            tail.unwrap().as_mut().list = None;
+            tail.unwrap().as_mut().prev = None;
+            tail.unwrap().as_mut().next = None;
             if tail == self.head {
-                self.head = std::ptr::null_mut();
+                self.head = None;
             }
         }
         tail
     }
 }
-// TODO Iter
-// TODO remove(&k);
-pub struct LfuCache<K: Eq + std::hash::Hash, V> {
+
+/// LfuCache O(1)
+pub struct LfuCache<K: Eq + Hash, V> {
     capacity: usize,
-    freq_list: *mut Link<K>,            // TODO Rc<K>
-    elements: HashMap<K, *mut Node<K>>, // TODO Rc<K>
-    data: HashMap<K, V>,                // TODO Rc<K>
+    freq_list: Option<NonNull<Link<Rc<K>>>>,
+    elements: HashMap<Rc<K>, Option<NonNull<Node<Rc<K>>>>>,
+    data: HashMap<Rc<K>, V>,
 }
 
-impl<K: Eq + std::hash::Hash, V> Debug for LfuCache<K, V> {
+impl<K: Eq + Hash, V> Debug for LfuCache<K, V> {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         unsafe {
-            let mut c = self.freq_list;
-            while !c.is_null() {
-                write!(f, "{}: ", (*c).times)?;
-                writeln!(f, "{:?}", (*c))?;
-                c = (*c).next;
+            let mut cur = self.freq_list;
+            while let Some(c) = cur {
+                write!(f, "{}: ", c.as_ref().times)?;
+                writeln!(f, "{:?}", c.as_ptr())?;
+                cur = c.as_ref().next;
             }
         }
         Ok(())
     }
 }
 
-// TODO remove Clone
-impl<K: Clone + Eq + std::hash::Hash, V> LfuCache<K, V> {
+impl<K: Eq + Hash, V> LfuCache<K, V> {
+    /// Returns the number of elements the cache can hold.
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Returns the number of elements in the cache.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Create a new LfuCache with give capacity
     pub fn new(capacity: usize) -> LfuCache<K, V> {
         LfuCache {
             capacity,
-            freq_list: std::ptr::null_mut(),
+            freq_list: None,
             elements: HashMap::new(),
             data: HashMap::new(),
         }
     }
+
+    /// Return None if k doesn't exist
     pub fn get(&mut self, k: &K) -> Option<&V> {
         if !self.data.contains_key(k) {
             return None;
@@ -245,46 +277,10 @@ impl<K: Clone + Eq + std::hash::Hash, V> LfuCache<K, V> {
         }
         self.data.get(k)
     }
-    unsafe fn update(&mut self, k: &K) {
-        let &node = self.elements.get(k).unwrap();
-        let cur_list = (*node).list;
-        // Remove node from original list
-        (*cur_list).remove_node(node);
-        let cur_cnt = (*cur_list).times;
-        if (*cur_list).next.is_null() {
-            // Create new list, append list
-            let list = to_raw(Link::new(cur_cnt + 1));
-            (*list).prev = cur_list;
-            (*cur_list).next = list;
-        }
-        if (*(*cur_list).next).times != cur_cnt + 1 {
-            // Create and insert new list
-            let next = (*cur_list).next;
-            let list = to_raw(Link::new(cur_cnt + 1));
-            (*list).prev = cur_list;
-            (*list).next = next;
-            (*cur_list).next = list;
-            (*next).prev = list;
-        }
-        let old_list = cur_list;
-        let next_list = (*cur_list).next;
-        // Add node to next list
-        (*next_list).push_front_node(node);
-        if (*old_list).len == 0 {
-            if old_list == self.freq_list {
-                // Remove empty head list
-                self.freq_list = (*old_list).next;
-            } else if (*old_list).next.is_null() {
-                // Unreachable
-                unreachable!();
-            } else {
-                (*(*old_list).prev).next = (*old_list).next;
-                (*(*old_list).next).prev = (*old_list).prev;
-                std::ptr::drop_in_place(old_list);
-            }
-        }
-    }
+
+    /// Insert a new K-V entry to the cache
     pub fn insert(&mut self, k: K, v: V) {
+        let k = Rc::new(k);
         if self.elements.contains_key(&k) {
             self.data.insert(k.clone(), v);
             unsafe {
@@ -295,38 +291,89 @@ impl<K: Clone + Eq + std::hash::Hash, V> LfuCache<K, V> {
         unsafe {
             self.eviction();
         }
-        let n = Box::leak(Box::new(Node {
-            prev: std::ptr::null_mut(),
-            next: std::ptr::null_mut(),
-            list: std::ptr::null_mut(),
+        let n = NonNull::new(to_raw(Node {
+            prev: None,
+            next: None,
+            list: None,
             value: k.clone(),
         }));
         self.elements.insert(k.clone(), n);
         self.data.insert(k.clone(), v);
-        if self.freq_list.is_null() {
-            self.freq_list = to_raw(Link::new(1));
+        if self.freq_list.is_none() {
+            self.freq_list = NonNull::new(to_raw(Link::new(1)));
         }
         unsafe {
-            if (*self.freq_list).times != 1 {
-                let once = to_raw(Link::new(1));
-                (*once).next = self.freq_list;
-                (*self.freq_list).prev = once;
+            if self.freq_list.unwrap().as_ref().times != 1 {
+                let once = NonNull::new(to_raw(Link::new(1)));
+                once.unwrap().as_mut().next = self.freq_list;
+                self.freq_list.unwrap().as_mut().prev = once;
                 self.freq_list = once;
             }
-            (*self.freq_list).push_front_node(n);
+            self.freq_list.unwrap().as_mut().push_front_node(n);
+        }
+    }
+}
+
+impl<K: Eq + Hash, V> LfuCache<K, V> {
+    unsafe fn update(&mut self, k: &K) {
+        let &node = self.elements.get(k).unwrap();
+        let mut cur_list = node.unwrap().as_ref().list.unwrap();
+        // Remove node from original list
+        cur_list.as_mut().remove_node(node);
+
+        let cur_cnt = cur_list.as_ref().times;
+
+        if cur_list.as_ref().next.is_none() {
+            // Create new list, append list
+            let list = to_raw(Link::new(cur_cnt + 1));
+            (*list).prev = Some(cur_list);
+            cur_list.as_mut().next = NonNull::new(list);
+        }
+
+        if cur_list.as_ref().next.unwrap().as_ref().times != cur_cnt + 1 {
+            // Create and insert new list
+            let next = cur_list.as_ref().next;
+            let list = to_raw(Link::new(cur_cnt + 1));
+            (*list).prev = Some(cur_list);
+            (*list).next = next;
+            let list = NonNull::new(list);
+            cur_list.as_mut().next = list;
+            next.unwrap().as_mut().prev = list;
+        }
+
+        let old_list = cur_list;
+        let next_list = cur_list.as_ref().next;
+
+        // Add node to next list
+        next_list.unwrap().as_mut().push_front_node(node);
+
+        if old_list.as_ref().len == 0 {
+            if old_list == self.freq_list.unwrap() {
+                // Remove empty head list
+                self.freq_list = old_list.as_ref().next;
+            } else if old_list.as_ref().next.is_none() {
+                // Unreachable
+                unreachable!();
+            } else {
+                old_list.as_ref().prev.unwrap().as_mut().next = old_list.as_ref().next;
+                old_list.as_ref().next.unwrap().as_mut().prev = old_list.as_ref().prev;
+            }
+            std::ptr::drop_in_place(old_list.as_ptr());
         }
     }
     unsafe fn eviction(&mut self) {
         if self.data.len() == self.capacity {
-            let ptr = (*self.freq_list).pop_back();
-            let k = &(*ptr).value;
-            self.elements.remove(k);
-            self.data.remove(k);
-            std::ptr::drop_in_place(ptr);
-            if (*self.freq_list).len == 0 {
+            let ptr = self.freq_list.unwrap().as_mut().pop_back();
+            let k = ptr.unwrap().as_ref().value.clone();
+            self.elements.remove(&k);
+            self.data.remove(&k);
+            std::ptr::drop_in_place(ptr.unwrap().as_ptr());
+
+            // Remove empty list
+            if self.freq_list.unwrap().as_ref().len == 0 {
                 let empty_head = self.freq_list;
-                self.freq_list = (*self.freq_list).next;
-                std::ptr::drop_in_place(empty_head);
+                self.freq_list = self.freq_list.unwrap().as_ref().next;
+                std::ptr::drop_in_place(empty_head.unwrap().as_ptr());
             }
         }
     }
