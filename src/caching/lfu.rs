@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+use std::collections::HashMap;
 #[test]
 fn test_list() {
     unsafe {
@@ -8,11 +9,40 @@ fn test_list() {
         list.push_back(3);
         list.push_back(4);
         // [2,1,3,4]
+        assert_eq!(list.len, 4);
         assert_eq!(2, (*list.head).value);
         assert_eq!(1, (*(*list.head).next).value);
         assert_eq!(3, (*(*list.tail).prev).value);
         assert_eq!(4, (*list.tail).value);
         assert_eq!(3, (*(*(*list.head).next).next).value);
+
+        list.remove_node((*(*list.head).next).next);
+        // [2,1,4]
+        assert_eq!(list.len, 3);
+        assert_eq!(4, (*(*(*list.head).next).next).value);
+        assert_eq!(2, (*list.head).value);
+        assert_eq!(1, (*(*list.head).next).value);
+        assert_eq!(4, (*list.tail).value);
+        list.remove_node(list.head);
+        // [1,4]
+        assert_eq!(list.len, 2);
+        assert_eq!(1, (*list.head).value);
+        assert_eq!(1, (*(*list.tail).prev).value);
+        assert_eq!(4, (*list.tail).value);
+        assert_eq!(4, (*(*list.head).next).value);
+        list.remove_node(list.tail);
+        // [1]
+        assert_eq!(list.len, 1);
+        assert_eq!(1, (*list.head).value);
+        assert_eq!(1, (*list.tail).value);
+        assert_eq!(list.head, list.tail);
+        assert!((*list.head).prev.is_null());
+        assert!((*list.head).next.is_null());
+        list.remove_node(list.tail);
+        // []
+        assert_eq!(list.len, 0);
+        assert!(list.head.is_null());
+        assert!(list.tail.is_null());
     }
 }
 #[test]
@@ -46,6 +76,7 @@ fn test_lfu() {
     }
     assert_eq!(cache.get(&5), Some(&5));
     assert_eq!(cache.get(&5), Some(&5));
+
     assert_eq!(cache.get(&5), Some(&5));
     assert_eq!(cache.get(&6), Some(&6));
     assert_eq!(cache.get(&6), Some(&6));
@@ -56,13 +87,32 @@ fn test_lfu() {
     assert_eq!(cache.get(&6), Some(&6));
 }
 
+// #[test]
+fn test_mem_leak() {
+    let mut cache = LfuCache::new(100);
+    let start = std::time::Instant::now();
+    let dur = std::time::Duration::from_secs(60);
+    while start.elapsed() < dur {
+        for i in 0..10000 {
+            let k = format!("This is a long key ..................{}", i);
+            cache.insert(k.clone(), k);
+        }
+        for i in (0..10000).rev() {
+            let k = format!("This is a long key ..................{}", i);
+            cache.insert(k.clone(), k);
+        }
+        for i in 0..10000 {
+            let k = format!("This is a long key ..................{}", i);
+            cache.insert(k.clone(), k);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 #[inline]
 fn to_raw<T>(t: T) -> *mut T {
     Box::leak(Box::new(t))
 }
-
-use std::collections::HashMap;
-
 // TODO Option<NonNull<Node<T>>>
 #[derive(Debug)]
 struct Node<T> {
@@ -81,6 +131,25 @@ struct Link<T> {
     next: *mut Link<T>,
 }
 impl<T> Link<T> {
+    fn print(&self) {
+        // TODO impl Debug
+        unsafe {
+            println!("List {:?}", self as *const _);
+            let mut c = self.head;
+            while !c.is_null() {
+                print!("{:?} -> ", c);
+                c = (*c).next;
+            }
+            println!("NULL");
+            let mut c = self.tail;
+            while !c.is_null() {
+                print!("{:?} -> ", c);
+                c = (*c).prev;
+            }
+            println!("NULL");
+        }
+    }
+
     fn new(times: u64) -> Link<T> {
         Link {
             times,
@@ -109,6 +178,20 @@ impl<T> Link<T> {
             self.tail = node;
         }
     }
+    unsafe fn remove_node(&mut self, node: *mut Node<T>) {
+        let cur_list = (*node).list;
+        assert_eq!(self as *mut _, cur_list);
+        if self.head == node {
+            self.pop_front();
+        } else if self.tail == node {
+            self.pop_back();
+        } else {
+            (*(*node).next).prev = (*node).prev;
+            (*(*node).prev).next = (*node).next;
+            (*cur_list).len -= 1;
+        }
+        (*node).list = std::ptr::null_mut();
+    }
 
     fn push_front(&mut self, v: T) {
         let node = Box::leak(Box::new(Node {
@@ -122,18 +205,23 @@ impl<T> Link<T> {
 
     fn push_front_node(&mut self, node: *mut Node<T>) {
         self.len += 1;
-
         unsafe {
             (*node).list = self;
         }
         if self.head.is_null() {
+            unsafe {
+                (*node).next = std::ptr::null_mut();
+                (*node).prev = std::ptr::null_mut();
+            }
             self.head = node;
             self.tail = node;
             return;
         }
         unsafe {
+            (*node).next = self.head;
             (*self.head).prev = node;
-            self.head = (*self.head).prev;
+            self.head = node;
+            (*self.head).prev = std::ptr::null_mut();
         }
     }
     fn pop_front(&mut self) -> *mut Node<T> {
@@ -144,7 +232,17 @@ impl<T> Link<T> {
         let head = self.head;
         unsafe {
             self.head = (*head).next;
-            (*self.head).prev = std::ptr::null_mut();
+            if !self.head.is_null() {
+                (*self.head).prev = std::ptr::null_mut();
+            }
+        }
+        unsafe {
+            (*head).list = std::ptr::null_mut();
+            (*head).prev = std::ptr::null_mut();
+            (*head).next = std::ptr::null_mut();
+            if head == self.tail {
+                self.tail = std::ptr::null_mut();
+            }
         }
         head
     }
@@ -157,7 +255,17 @@ impl<T> Link<T> {
         let tail = self.tail;
         unsafe {
             self.tail = (*tail).prev;
-            (*self.tail).next = std::ptr::null_mut();
+            if !self.tail.is_null() {
+                (*self.tail).next = std::ptr::null_mut();
+            }
+        }
+        unsafe {
+            (*tail).list = std::ptr::null_mut();
+            (*tail).prev = std::ptr::null_mut();
+            (*tail).next = std::ptr::null_mut();
+            if tail == self.head {
+                self.head = std::ptr::null_mut();
+            }
         }
         tail
     }
@@ -190,50 +298,37 @@ impl<K: Clone + Eq + std::hash::Hash, V> LfuCache<K, V> {
         self.data.get(k)
     }
     unsafe fn update(&mut self, k: &K) {
-        let node = {
-            // Remove node from original list
-            let &node = self.elements.get(k).unwrap();
-            if (*node).next.is_null() {
-                if !(*node).prev.is_null() {
-                    let n = (*(*node).list).pop_back();
-                    n
-                } else {
-                    node
-                }
-            } else if (*node).prev.is_null() {
-                (*(*node).list).pop_front()
-            } else {
-                (*(*node).next).prev = (*node).prev;
-                (*(*node).prev).next = (*node).next;
-                (*(*node).list).len -= 1;
-                node
-            }
-        };
-        let cur_cnt = (*(*node).list).times;
-        if (*(*node).list).next.is_null() {
+        let &node = self.elements.get(k).unwrap();
+        let cur_list = (*node).list;
+        // Remove node from original list
+        (*cur_list).remove_node(node);
+        let cur_cnt = (*cur_list).times;
+        if (*cur_list).next.is_null() {
             // Create new list, append list
             let list = to_raw(Link::new(cur_cnt + 1));
-            (*list).prev = (*node).list;
-            (*(*node).list).next = list;
+            (*list).prev = cur_list;
+            (*cur_list).next = list;
         }
-        if (*(*(*node).list).next).times != cur_cnt + 1 {
+        if (*(*cur_list).next).times != cur_cnt + 1 {
             // Create and insert new list
-            let next = (*(*node).list).next;
+            let next = (*cur_list).next;
             let list = to_raw(Link::new(cur_cnt + 1));
-            (*list).prev = (*node).list;
+            (*list).prev = cur_list;
             (*list).next = next;
-            (*(*node).list).next = list;
+            (*cur_list).next = list;
             (*next).prev = list;
         }
-        let old_list = (*node).list;
+        let old_list = cur_list;
+        let next_list = (*cur_list).next;
         // Add node to next list
-        (*(*(*node).list).next).push_front_node(node);
+        (*next_list).push_front_node(node);
         if (*old_list).len == 0 {
             if old_list == self.freq_list {
                 // Remove empty head list
                 self.freq_list = (*old_list).next;
             } else if (*old_list).next.is_null() {
                 // Unreachable
+                unreachable!();
             } else {
                 (*(*old_list).prev).next = (*old_list).next;
                 (*(*old_list).next).prev = (*old_list).prev;
@@ -264,6 +359,12 @@ impl<K: Clone + Eq + std::hash::Hash, V> LfuCache<K, V> {
             self.freq_list = to_raw(Link::new(1));
         }
         unsafe {
+            if (*self.freq_list).times != 1 {
+                let once = to_raw(Link::new(1));
+                (*once).next = self.freq_list;
+                (*self.freq_list).prev = once;
+                self.freq_list = once;
+            }
             (*self.freq_list).push_front_node(n);
         }
     }
@@ -271,13 +372,27 @@ impl<K: Clone + Eq + std::hash::Hash, V> LfuCache<K, V> {
         if self.data.len() == self.capacity {
             let ptr = (*self.freq_list).pop_back();
             let k = &(*ptr).value;
-            self.data.remove(k);
             self.elements.remove(k);
+            self.data.remove(k);
             std::ptr::drop_in_place(ptr);
             if (*self.freq_list).len == 0 {
                 let empty_head = self.freq_list;
                 self.freq_list = (*self.freq_list).next;
                 std::ptr::drop_in_place(empty_head);
+            }
+        }
+    }
+    fn print(&self) {
+        // TODO impl Debug
+        if 2 > 1 {
+            return;
+        }
+        unsafe {
+            let mut c = self.freq_list;
+            while !c.is_null() {
+                print!("{}: ", (*c).times);
+                (*c).print();
+                c = (*c).next;
             }
         }
     }
