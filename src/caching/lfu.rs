@@ -1,5 +1,8 @@
 #![allow(dead_code)]
 use std::collections::HashMap;
+use std::fmt::Debug;
+use std::fmt::Formatter;
+use std::fmt::Result as FmtResult;
 #[test]
 fn test_list() {
     unsafe {
@@ -45,69 +48,6 @@ fn test_list() {
         assert!(list.tail.is_null());
     }
 }
-#[test]
-fn test_lfu_robust() {
-    let capacity = 10;
-    let mut cache = LfuCache::new(capacity);
-    for i in 0..capacity * 100 {
-        cache.insert(i, i);
-    }
-    for i in 0..capacity * 100 {
-        cache.insert(i % 3, i);
-        cache.insert(i % 5, i);
-    }
-    for _ in 0..100 {
-        for i in 0..capacity {
-            cache.get(&i);
-        }
-    }
-}
-
-#[test]
-fn test_lfu() {
-    let capacity = 10;
-    let mut cache = LfuCache::new(capacity);
-    for i in 0..capacity {
-        cache.insert(i, i);
-        assert_eq!(cache.get(&i), Some(&i));
-    }
-    for i in 0..capacity {
-        assert_eq!(cache.get(&i), Some(&i));
-    }
-    assert_eq!(cache.get(&5), Some(&5));
-    assert_eq!(cache.get(&5), Some(&5));
-
-    assert_eq!(cache.get(&5), Some(&5));
-    assert_eq!(cache.get(&6), Some(&6));
-    assert_eq!(cache.get(&6), Some(&6));
-    for i in 2..capacity {
-        cache.insert(i, i);
-    }
-    assert_eq!(cache.get(&5), Some(&5));
-    assert_eq!(cache.get(&6), Some(&6));
-}
-
-// #[test]
-fn test_mem_leak() {
-    let mut cache = LfuCache::new(100);
-    let start = std::time::Instant::now();
-    let dur = std::time::Duration::from_secs(60);
-    while start.elapsed() < dur {
-        for i in 0..10000 {
-            let k = format!("This is a long key ..................{}", i);
-            cache.insert(k.clone(), k);
-        }
-        for i in (0..10000).rev() {
-            let k = format!("This is a long key ..................{}", i);
-            cache.insert(k.clone(), k);
-        }
-        for i in 0..10000 {
-            let k = format!("This is a long key ..................{}", i);
-            cache.insert(k.clone(), k);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-}
 
 #[inline]
 fn to_raw<T>(t: T) -> *mut T {
@@ -121,7 +61,6 @@ struct Node<T> {
     list: *mut Link<T>,
     value: T,
 }
-#[derive(Debug)]
 struct Link<T> {
     times: u64,
     len: usize,
@@ -130,26 +69,20 @@ struct Link<T> {
     prev: *mut Link<T>,
     next: *mut Link<T>,
 }
-impl<T> Link<T> {
-    fn print(&self) {
-        // TODO impl Debug
+impl<T> Debug for Link<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         unsafe {
-            println!("List {:?}", self as *const _);
+            writeln!(f, "Link {:?}", self as *const _)?;
             let mut c = self.head;
             while !c.is_null() {
-                print!("{:?} -> ", c);
+                write!(f, "{:?} -> ", c)?;
                 c = (*c).next;
             }
-            println!("NULL");
-            let mut c = self.tail;
-            while !c.is_null() {
-                print!("{:?} -> ", c);
-                c = (*c).prev;
-            }
-            println!("NULL");
+            writeln!(f, "NULL")
         }
     }
-
+}
+impl<T> Link<T> {
     fn new(times: u64) -> Link<T> {
         Link {
             times,
@@ -278,6 +211,21 @@ pub struct LfuCache<K: Eq + std::hash::Hash, V> {
     elements: HashMap<K, *mut Node<K>>, // TODO Rc<K>
     data: HashMap<K, V>,                // TODO Rc<K>
 }
+
+impl<K: Eq + std::hash::Hash, V> Debug for LfuCache<K, V> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        unsafe {
+            let mut c = self.freq_list;
+            while !c.is_null() {
+                write!(f, "{}: ", (*c).times)?;
+                writeln!(f, "{:?}", (*c))?;
+                c = (*c).next;
+            }
+        }
+        Ok(())
+    }
+}
+
 // TODO remove Clone
 impl<K: Clone + Eq + std::hash::Hash, V> LfuCache<K, V> {
     pub fn new(capacity: usize) -> LfuCache<K, V> {
@@ -379,20 +327,6 @@ impl<K: Clone + Eq + std::hash::Hash, V> LfuCache<K, V> {
                 let empty_head = self.freq_list;
                 self.freq_list = (*self.freq_list).next;
                 std::ptr::drop_in_place(empty_head);
-            }
-        }
-    }
-    fn print(&self) {
-        // TODO impl Debug
-        if 2 > 1 {
-            return;
-        }
-        unsafe {
-            let mut c = self.freq_list;
-            while !c.is_null() {
-                print!("{}: ", (*c).times);
-                (*c).print();
-                c = (*c).next;
             }
         }
     }
