@@ -139,7 +139,6 @@ impl<T> Link<T> {
             node.unwrap().as_ref().next.unwrap().as_mut().prev = node.unwrap().as_ref().prev;
             node.unwrap().as_ref().prev.unwrap().as_mut().next = node.unwrap().as_ref().next;
             cur_list.unwrap().as_mut().len -= 1;
-            // (*cur_list).len -= 1;
         }
         node.unwrap().as_mut().list = None;
     }
@@ -244,6 +243,12 @@ impl<K: Eq + Hash, V> Debug for LfuCache<K, V> {
     }
 }
 
+impl<K: Eq + Hash, V> Drop for LfuCache<K, V> {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
 impl<K: Eq + Hash, V> LfuCache<K, V> {
     /// Returns the number of elements the cache can hold.
     #[inline]
@@ -255,6 +260,24 @@ impl<K: Eq + Hash, V> LfuCache<K, V> {
     #[inline]
     pub fn len(&self) -> usize {
         self.data.len()
+    }
+
+    /// Remove all data in the cache.
+    pub fn clear(&mut self) {
+        let mut cur_list = self.freq_list;
+        while let Some(mut l) = cur_list {
+            unsafe {
+                cur_list = l.as_mut().next;
+                while l.as_mut().pop_back().is_some() {}
+            }
+        }
+        for v in self.elements.values_mut() {
+            unsafe {
+                std::ptr::drop_in_place(v.take().unwrap().as_ptr());
+            }
+        }
+        self.elements.clear();
+        self.data.clear();
     }
 
     /// Create a new LfuCache with give capacity

@@ -10,6 +10,9 @@ mod lfu {
         for i in 0..capacity * 100 {
             cache.insert(i % 3, i);
             cache.insert(i % 5, i);
+            if i % 30 == 0 {
+                cache.clear();
+            }
         }
         for _ in 0..100 {
             for i in 0..capacity {
